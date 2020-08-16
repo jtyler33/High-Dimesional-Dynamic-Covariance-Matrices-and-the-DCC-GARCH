@@ -1,0 +1,776 @@
+                                    ## DCC Estimation ##
+
+## Clear the Global Environment and Load Packages
+
+```{r}
+# Clear the Global Environment
+remove( list = ls() )
+
+# Load Libraries 
+library(rugarch)
+library(xdcclarge)
+library(rmgarch)
+library(kernlab)
+library(quantmod)
+require(forecast)
+library(caret)     
+library(Metrics)   
+library(xts)
+library("MSBVAR")
+library("vars")
+require(stats)
+library("RM2006")
+```
+
+## Load the Funtions required to conduct the DCC Estimation for the two applications:
+
+## 1) Global Minimum Variance Portfolio Functions
+```{r}
+cdcc_forecast_gmv <- function( Rtn, ht, residuals, type, n, train.days, test.days) {
+  
+  T <- train.days 
+  M <- test.days / 21      
+  
+  # Forecasted SD and IR (Performance Measures)
+  cdcc.sd.fcst <- rep(0, M+1)
+  cdcc.ir.fcst <- rep(0, M+1)
+  
+  for( t in seq(T, T+test.days, 21) ) {
+    
+    # Window
+    t0 = t-T+1
+    period.ret <- Rtn[t0:t, ]
+    
+    # Benchmark Portfolio (EW-TQ)
+    bm <- round( 0.20*ncol(period.ret), 0) 
+    bm.weights <- rep( 1/bm, bm )
+    
+    bm.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      bm.ret.t[i] <- as.numeric( bm.weights %*% as.numeric(period.ret[i, 1:bm]) ) }
+    
+    bm.mean.ret <- rep(0, bm)
+    for (i in 1:bm) {
+      bm.mean.ret[i] <- as.numeric( mean( period.ret[, i] ) ) }
+    bm.port.ret <- as.numeric( bm.weights %*% as.matrix( bm.mean.ret ) )
+    
+    # cDCC-GARCH Estimation 
+    cDCC <- cdcc_estimation( ini.para=c(0.05, 0.93) , ht = ht[t0:t,] , 
+                             residuals = residuals[t0:t,] , ts = 1, method = c(type) )
+    Rt <- matrix(cDCC$cdcc_Rt, n, n)
+    dt <- sqrt( ht[t, ] )
+    Dt <- diag(dt, nrow = n, ncol = n)
+    Ht <- Dt %*% Rt %*% Dt
+    identity = as.matrix( rep(1, n) )
+    invcov = as.matrix( solve(Ht) )
+    cdcc.weights = as.numeric( ( invcov%*%identity ) / as.numeric(t(identity)%*%invcov%*%identity) )
+    cdcc.var = as.numeric( cdcc.weights %*% Ht %*% as.matrix( cdcc.weights ) )
+    
+    steps.ahead <- ( (t-T)/ 252 ) * 12 +1
+    cdcc.sd.fcst[ steps.ahead ] <- sqrt( cdcc.var ) 
+    
+    # Investment Portfolio
+    ivt.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      ivt.ret.t[i] <-  as.numeric( cdcc.weights %*% as.numeric(period.ret[i, ]) ) }
+    
+    ivt.mean.ret <- rep(0, ncol(period.ret) )
+    for (i in 1:ncol(period.ret) ) {
+      ivt.mean.ret[i] <- as.numeric( mean( period.ret[ , i] ) ) }
+    ivt.port.ret <- as.numeric( cdcc.weights  %*% as.matrix( ivt.mean.ret ) )
+    
+    excess.ret <- ivt.ret.t - bm.ret.t
+    
+    # cDCC Forecasts
+    cdcc.ir.fcst[ steps.ahead ] <- (ivt.port.ret - bm.port.ret )/(sqrt(var(excess.ret)) ) 
+    cdcc.sd.fcst[ steps.ahead ] <- cdcc.sd.fcst[ steps.ahead ] * sqrt(252) * 100
+    cdcc.ir.fcst[ steps.ahead ] <- cdcc.ir.fcst[ steps.ahead ] * sqrt(252) 
+    
+  }
+  return(list( sd=cdcc.sd.fcst, ir=cdcc.ir.fcst ) ) 
+}
+naive_forecast_gmv <- function( Rtn, ht, residuals, type, n, train.days, test.days) {
+  
+  T <- train.days 
+  M <- test.days / 21      
+  
+  # Forecasted SD and IR (Performance Measures)
+  naive.sd.fcst <- rep(0, M+1)
+  naive.ir.fcst <- rep(0, M+1)
+  
+  for( t in seq(T, T+test.days, 21) ) {
+    
+    # Window
+    t0 = t-T+1
+    period.ret <- Rtn[t0:t, ]
+    
+    # Benchmark Portfolio (EW-TQ)
+    bm <- round( 0.20*ncol(period.ret), 0) 
+    bm.weights <- rep( 1/bm, bm )
+    
+    bm.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      bm.ret.t[i] <- as.numeric( bm.weights %*% as.numeric(period.ret[i, 1:bm]) ) }
+    
+    bm.mean.ret <- rep(0, bm)
+    for (i in 1:bm) {
+      bm.mean.ret[i] <- as.numeric( mean( period.ret[, i] ) ) }
+    bm.port.ret <- as.numeric( bm.weights %*% as.matrix( bm.mean.ret ) )
+    
+    # Naive Estimation
+    cov.naive <- cov( period.ret )   
+    identity = as.matrix( rep(1, n) )
+    invcov = as.matrix( solve( cov.naive ) )
+    naive.weights = as.numeric( ( invcov%*%identity ) / as.numeric(t(identity)%*%invcov%*%identity) )
+    naive.var = as.numeric( naive.weights %*% cov.naive %*% as.matrix( naive.weights ) )
+    
+    steps.ahead <- ( (t-T)/ 252 ) * 12 +1
+    naive.sd.fcst[ steps.ahead ] <- sqrt( naive.var ) 
+    
+    # Investment Portfolio
+    ivt.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      ivt.ret.t[i] <-  as.numeric( naive.weights %*% as.numeric(period.ret[i, ]) ) }
+    
+    ivt.mean.ret <- rep(0, ncol(period.ret) )
+    for (i in 1:ncol(period.ret) ) {
+      ivt.mean.ret[i] <- as.numeric( mean( period.ret[ , i] ) ) }
+    ivt.port.ret <- as.numeric( naive.weights  %*% as.matrix( ivt.mean.ret ) )
+    
+    excess.ret <- ivt.ret.t - bm.ret.t
+    
+    # Naive Forecasts
+    naive.ir.fcst[ steps.ahead ] <- (ivt.port.ret - bm.port.ret )/(sqrt(var(excess.ret)) ) 
+    naive.sd.fcst[ steps.ahead ] <- naive.sd.fcst[ steps.ahead ] * sqrt(252) * 100
+    naive.ir.fcst[ steps.ahead ] <- naive.ir.fcst[ steps.ahead ] * sqrt(252) 
+    
+  }
+  return(list( sd=naive.sd.fcst, ir=naive.ir.fcst ) ) 
+}
+rm2006_forecast_gmv <- function( Rtn, ht, residuals, type, n, train.days, test.days) {
+  
+  T <- train.days 
+  M <- test.days / 21      
+  
+  # Forecasted SD and IR (Performance Measures)
+  rm2006.sd.fcst <- rep(0, M+1)
+  rm2006.ir.fcst <- rep(0, M+1)
+  
+  for( t in seq(T, T+test.days, 21) ) {
+    
+    # Window
+    t0 = t-T+1
+    period.ret <- Rtn[t0:t, ]
+    
+    # Benchmark Portfolio (EW-TQ)
+    bm <- round( 0.20*ncol(period.ret), 0) 
+    bm.weights <- rep( 1/bm, bm )
+    
+    bm.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      bm.ret.t[i] <- as.numeric( bm.weights %*% as.numeric(period.ret[i, 1:bm]) ) }
+    
+    bm.mean.ret <- rep(0, bm)
+    for (i in 1:bm) {
+      bm.mean.ret[i] <- as.numeric( mean( period.ret[, i] ) ) }
+    bm.port.ret <- as.numeric( bm.weights %*% as.matrix( bm.mean.ret ) )
+    
+    # Risk Metrics Estimation
+    cov.rm2006 <- RM2006( as.matrix( period.ret ) ) 
+    cov.rm2006 <- cov.rm2006[, , nrow( period.ret ) ]
+    
+    identity = as.matrix( rep(1, n) )
+    invcov = as.matrix( solve( cov.rm2006 ) )
+    rm2006.weights = as.numeric( ( invcov%*%identity ) / as.numeric(t(identity)%*%invcov%*%identity) )
+    rm2006.var = as.numeric( rm2006.weights %*% cov.rm2006 %*% as.matrix( rm2006.weights ) )
+    
+    steps.ahead <- ( (t-T)/ 252 ) * 12 +1
+    rm2006.sd.fcst[ steps.ahead ] <- sqrt( rm2006.var ) 
+    
+    # Investment Portfolio
+    ivt.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      ivt.ret.t[i] <-  as.numeric( rm2006.weights %*% as.numeric(period.ret[i, ]) ) }
+    
+    ivt.mean.ret <- rep(0, ncol(period.ret) )
+    for (i in 1:ncol(period.ret) ) {
+      ivt.mean.ret[i] <- as.numeric( mean( period.ret[ , i] ) ) }
+    ivt.port.ret <- as.numeric( rm2006.weights  %*% as.matrix( ivt.mean.ret ) )
+    
+    excess.ret <- ivt.ret.t - bm.ret.t
+    
+    # Risk Metrics Forecasts
+    rm2006.ir.fcst[ steps.ahead ] <- (ivt.port.ret - bm.port.ret )/(sqrt(var(excess.ret)) ) 
+    rm2006.sd.fcst[ steps.ahead ] <- rm2006.sd.fcst[ steps.ahead ] * sqrt(252) * 100
+    rm2006.ir.fcst[ steps.ahead ] <- rm2006.ir.fcst[ steps.ahead ] * sqrt(252) 
+    
+  }
+  return(list( sd=rm2006.sd.fcst, ir=rm2006.ir.fcst ) ) 
+}
+all.models_gmv <- function( Rtn, ht, residuals, n, train.days, test.days ) {
+  
+  # All Forecasts (GMV)
+  a <- cdcc_forecast_gmv(Rtn, ht = ht, residuals = residuals, type = "COV", n = n, 
+                         train.days = train.days, test.days = test.days)
+  b <- cdcc_forecast_gmv(Rtn, ht = ht, residuals = residuals, type = "LS", n = n, 
+                         train.days = train.days, test.days = test.days)
+  c <- cdcc_forecast_gmv(Rtn, ht = ht, residuals = residuals, type = "NLS", n = n, 
+                         train.days = train.days, test.days = test.days)
+  d <- naive_forecast_gmv(Rtn = Rtn , n = n, train.days = train.days, test.days = test.days)
+  
+  e <- rm2006_forecast_gmv(Rtn = Rtn , n = n, train.days = train.days, test.days = test.days)
+  
+  
+  port.sd <- cbind(a$sd, b$sd, c$sd, d$sd, e$sd )
+  colnames(port.sd) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  port.mean.sd <- rep(0, ncol(port.sd))
+  
+  for (i in 1:ncol(port.sd)) {
+    port.mean.sd[i] <- mean(port.sd[, i]) }
+  
+  # Mean Standard Deviation Metric
+  sd <- as.data.frame( t( port.mean.sd ) )
+  colnames(sd) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  
+  port.ir <- cbind(a$ir, b$ir, c$ir, d$ir, e$ir )
+  colnames(port.ir) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  port.mean.ir <- rep(0, ncol(port.ir))
+  
+  for (i in 1:ncol(port.ir)) {
+    port.mean.ir[i] <- mean(port.ir[, i]) }
+  
+  # Mean Information Ratio Metric
+  ir <- as.data.frame( t( port.mean.ir ) )
+  colnames(ir) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  return(list(sd = sd, port.sd = port.sd, ir = ir) )
+}
+dm_test_gmv <- function(df, n) {
+  
+  # case a) Sample Vs NLS 
+  d_a = df[, "Sample"] - df[, "NLS"]
+  DM_a = mean( d_a ) / sqrt( lrvar(d_a) )
+  DM.pval_a <- 1-pchisq( DM_a**2 , 1 )
+  
+  # case b) Naive Vs NLS 
+  d_b = df[, "1/N"] - df[, "NLS"]
+  DM_b = mean( d_b ) / sqrt( lrvar(d_b) )
+  DM.pval_b <- 1-pchisq( DM_b**2 , 1 )
+  
+  test.res <- cbind.data.frame( DM.pval_a, DM.pval_b )
+  colnames(test.res) <- c("DCC-S Vs. DCC-NLS", "1/N Vs. DCC-NLS" ) 
+  rownames(test.res) <- paste("p-values", n )
+  return(test.res)
+}
+ks_test_gmv <- function(df, n) {
+  
+  # case a) Sample Vs NLS
+  ks.sig_a <- ks.test(  df[, "Sample"] , df[, "NLS" ], alternative = "less")
+  
+  # case b) Naive Vs NLS
+  ks.sig_b <- ks.test(  df[, "1/N"], df[, "NLS"], alternative = "less" ) 
+  
+  test.res <- cbind.data.frame( ks.sig_a$p.value, ks.sig_b$p.value )
+  colnames(test.res) <- c("DCC-S Vs. DCC-NLS", "1/N Vs. DCC-NLS" ) 
+  rownames(test.res) <- paste("p-values", n )
+  return(test.res) 
+}
+```
+
+## 2) Full Markowitz portfolio with the Momentum Signal Functions
+```{r}
+cdcc_forecast_moment <- function( prices, Rtn, ht, residuals, type, n, train.days, test.days) {
+  
+  T <- train.days 
+  M <- test.days / 21      
+  
+  # Forecasted SD and IR (Performance Measures) 
+  cdcc.sd.fcst <- rep(0, M+1)
+  cdcc.ir.fcst <- rep(0, M+1)
+  
+  for( t in seq(T, T+test.days, 21) ) {
+    
+    # Window
+    t0 = t-T+1
+    period.ret <- Rtn[t0:t, ]
+    period.price <- prices[t0:t, ]
+    
+    #  Benchmark Portfolio (EW-TQ)
+    bm <- round( 0.20*ncol(period.ret), 0) 
+    bm.weights <- rep( 1/bm, bm )
+    
+    bm.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      bm.ret.t[i] <- as.numeric( bm.weights %*% as.numeric(period.ret[i, 1:bm]) ) }
+    
+    bm.mean.ret <- rep(0, bm)
+    for (i in 1:bm) {
+      bm.mean.ret[i] <- as.numeric( mean( period.ret[, i] ) ) }
+    bm.port.ret <- as.numeric( bm.weights %*% as.matrix( bm.mean.ret ) )
+    
+    # cDCC-GARCH Estimation 
+    cDCC <- cdcc_estimation( ini.para=c(0.05, 0.93) , ht = ht[t0:t,] , 
+                             residuals = residuals[t0:t,] , ts = 1, method = c(type) )
+    Rt <- matrix(cDCC$cdcc_Rt, n, n)
+    dt <- sqrt( ht[t, ] )
+    Dt <- diag(dt, nrow = n, ncol = n)
+    Ht <- Dt %*% Rt %*% Dt
+    identity = as.matrix( rep(1, n) )
+    invcov = as.matrix( solve(Ht) )
+    
+    # Momentum (Signal in the Full Markowitz portfolio setting)
+    moment <- rep(0, ncol(period.price) )
+    for (i in 1:ncol(period.price) ) {
+      moment[i] <- mean( na.omit( momentum(period.price[, i]) ) ) }
+    
+    
+    A = as.numeric( t( identity ) %*% invcov %*% identity ) 
+    B = as.numeric( ( t( identity ) %*% invcov ) * bm.port.ret ) 
+    C = as.numeric( moment %*% invcov %*% as.matrix(moment) ) 
+    
+    c1 = as.numeric( (C -  bm.port.ret*B) / ( A*C - B**2) )
+    c2 = as.numeric( (bm.port.ret*A  - B) / ( A*C - B**2 ) )
+    
+    # Markowitz Full Portfolio Weights
+    cdcc.weights = c1 * as.numeric( invcov %*% identity )  + 
+      c2 * as.numeric( ( invcov %*% as.matrix(moment) ) )
+    cdcc.var = as.numeric( cdcc.weights %*% Ht %*% as.matrix( cdcc.weights ) )
+    
+    steps.ahead <- ( (t-T)/ 252 ) * 12 +1
+    cdcc.sd.fcst[ steps.ahead ] <- sqrt( cdcc.var ) 
+    
+    # Investment Portfolio
+    ivt.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      ivt.ret.t[i] <-  as.numeric( cdcc.weights %*% as.numeric(period.ret[i, ]) ) }
+    
+    ivt.mean.ret <- rep(0, ncol(period.ret) )
+    for (i in 1:ncol(period.ret) ) {
+      ivt.mean.ret[i] <- as.numeric( mean( period.ret[ , i] ) ) }
+    ivt.port.ret <- as.numeric( cdcc.weights  %*% as.matrix( ivt.mean.ret ) )
+    
+    excess.ret <- ivt.ret.t - bm.ret.t
+    
+    # cDCC Forecasts
+    cdcc.ir.fcst[ steps.ahead ] <- (ivt.port.ret - bm.port.ret )/(sqrt(var(excess.ret)) ) 
+    cdcc.sd.fcst[ steps.ahead ] <- cdcc.sd.fcst[ steps.ahead ] * sqrt(252) * 100
+    cdcc.ir.fcst[ steps.ahead ] <- cdcc.ir.fcst[ steps.ahead ] * sqrt(252) 
+  }
+  return(list( sd=cdcc.sd.fcst, ir=cdcc.ir.fcst) ) 
+}
+naive_forecast_moment <- function( prices, Rtn, ht, residuals, type, n, train.days, test.days) {
+  
+  T <- train.days 
+  M <- test.days / 21      
+  
+  # Forecasted SD and IR (Performance Measures)
+  naive.sd.fcst <- rep(0, M+1)
+  naive.ir.fcst <- rep(0, M+1)
+  
+  for( t in seq(T, T+test.days, 21) ) {
+    
+    # Window
+    t0 = t-T+1
+    period.ret <- Rtn[t0:t, ]
+    
+    # Benchmark Portfolio (EW-TQ) 
+    bm <- round( 0.20*ncol(period.ret), 0) 
+    bm.weights <- rep( 1/bm, bm )
+    
+    bm.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      bm.ret.t[i] <- as.numeric( bm.weights %*% as.numeric(period.ret[i, 1:bm]) ) }
+    
+    bm.mean.ret <- rep(0, bm)
+    for (i in 1:bm) {
+      bm.mean.ret[i] <- as.numeric( mean( period.ret[, i] ) ) }
+    bm.port.ret <- as.numeric( bm.weights %*% as.matrix( bm.mean.ret ) )
+    
+    # Naive Estimation
+    cov.naive <- cov( period.ret )   
+    identity = as.matrix( rep(1, n) )
+    invcov = as.matrix( solve( cov.naive ) )
+    naive.weights = as.numeric( ( invcov%*%identity ) / as.numeric(t(identity)%*%invcov%*%identity) )
+    naive.var = as.numeric( naive.weights %*% cov.naive %*% as.matrix( naive.weights ) )
+    
+    steps.ahead <- ( (t-T)/ 252 ) * 12 +1
+    naive.sd.fcst[ steps.ahead ] <- sqrt( naive.var ) 
+    
+    # Investment Portfolio
+    ivt.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      ivt.ret.t[i] <-  as.numeric( naive.weights %*% as.numeric(period.ret[i, ]) ) }
+    
+    ivt.mean.ret <- rep(0, ncol(period.ret) )
+    for (i in 1:ncol(period.ret) ) {
+      ivt.mean.ret[i] <- as.numeric( mean( period.ret[ , i] ) ) }
+    ivt.port.ret <- as.numeric( naive.weights  %*% as.matrix( ivt.mean.ret ) )
+    
+    excess.ret <- ivt.ret.t - bm.ret.t
+    
+    # Naive Forecasts
+    naive.ir.fcst[ steps.ahead ] <- (ivt.port.ret - bm.port.ret )/(sqrt(var(excess.ret)) ) 
+    naive.sd.fcst[ steps.ahead ] <- naive.sd.fcst[ steps.ahead ] * sqrt(252) * 100
+    naive.ir.fcst[ steps.ahead ] <- naive.ir.fcst[ steps.ahead ] * sqrt(252) 
+    
+  }
+  return(list( sd=naive.sd.fcst, ir=naive.ir.fcst ) ) 
+}
+rm2006_forecast_moment <- function(prices, Rtn, ht, residuals, type, n, train.days, test.days) {
+  
+  T <- train.days 
+  M <- test.days / 21      
+  
+  # Forecasted SD and IR (Performance Measures) 
+  rm2006.sd.fcst <- rep(0, M+1)
+  rm2006.ir.fcst <- rep(0, M+1)
+  
+  for( t in seq(T, T+test.days, 21) ) {
+    
+    # Window
+    t0 = t-T+1
+    period.ret <- Rtn[t0:t, ]
+    period.price <- prices[t0:t, ]
+    
+    # Benchmark Portfolio (EW-TQ)
+    bm <- round( 0.20*ncol(period.ret), 0) 
+    bm.weights <- rep( 1/bm, bm )
+    
+    bm.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      bm.ret.t[i] <- as.numeric( bm.weights %*% as.numeric(period.ret[i, 1:bm]) ) }
+    
+    bm.mean.ret <- rep(0, bm)
+    for (i in 1:bm) {
+      bm.mean.ret[i] <- as.numeric( mean( period.ret[, i] ) ) }
+    bm.port.ret <- as.numeric( bm.weights %*% as.matrix( bm.mean.ret ) )
+    
+    # Risk Metrics Estimation
+    cov.rm2006 <- RM2006( as.matrix( period.ret ) ) 
+    cov.rm2006 <- cov.rm2006[, , nrow( period.ret ) ]
+    
+    identity = as.matrix( rep(1, n) )
+    invcov = as.matrix( solve( cov.rm2006 ) )
+    
+    # Momentum (Signal in the Full Markowitz portfolio setting)
+    moment <- rep(0, ncol(period.price) )
+    for (i in 1:ncol(period.price) ) {
+      moment[i] <- mean( na.omit( momentum(period.price[, i]) ) ) }
+
+    A = as.numeric( t( identity ) %*% invcov %*% identity ) 
+    B = as.numeric( ( t( identity ) %*% invcov ) * bm.port.ret ) 
+    C = as.numeric( moment %*% invcov %*% as.matrix(moment) ) 
+    
+    c1 = as.numeric( (C -  bm.port.ret*B) / ( A*C - B**2) )
+    c2 = as.numeric( (bm.port.ret*A  - B) / ( A*C - B**2 ) )
+    
+    
+    # Full Markowitz Portfolio Weights
+    rm2006.weights = c1 * as.numeric( invcov %*% identity )  + 
+      c2 * as.numeric( ( invcov %*% as.matrix(moment) ) )
+    rm2006.var = as.numeric( rm2006.weights %*% cov.rm2006 %*% as.matrix( rm2006.weights ) )
+    
+    steps.ahead <- ( (t-T)/ 252 ) * 12 +1
+    rm2006.sd.fcst[ steps.ahead ] <- sqrt( rm2006.var ) 
+    
+    # Investment Portfolio
+    ivt.ret.t <- rep( 0, train.days )
+    for (i in 1:train.days) {
+      ivt.ret.t[i] <-  as.numeric( rm2006.weights %*% as.numeric(period.ret[i, ]) ) }
+    
+    ivt.mean.ret <- rep(0, ncol(period.ret) )
+    for (i in 1:ncol(period.ret) ) {
+      ivt.mean.ret[i] <- as.numeric( mean( period.ret[ , i] ) ) }
+    ivt.port.ret <- as.numeric( rm2006.weights  %*% as.matrix( ivt.mean.ret ) )
+    
+    excess.ret <- ivt.ret.t - bm.ret.t
+    
+    # Risk Metrics Forecasts
+    rm2006.ir.fcst[ steps.ahead ] <- (ivt.port.ret - bm.port.ret )/(sqrt(var(excess.ret)) ) 
+    rm2006.sd.fcst[ steps.ahead ] <- rm2006.sd.fcst[ steps.ahead ] * sqrt(252) * 100
+    rm2006.ir.fcst[ steps.ahead ] <- rm2006.ir.fcst[ steps.ahead ] * sqrt(252) 
+  }
+  return(list( sd=rm2006.sd.fcst, ir=rm2006.ir.fcst) ) 
+}
+all.models_moment <- function(prices, Rtn, ht, residuals, n, train.days, test.days ) {
+  
+  # All Model Forecasts (Full Markowitz)
+  a <- cdcc_forecast_moment(prices = prices, Rtn = Rtn, ht = ht, residuals = residuals, 
+                            type= "COV", n = n, train.days = train.days, 
+                            test.days = test.days)
+  b <- cdcc_forecast_moment(prices = prices, Rtn = Rtn, ht = ht, residuals = residuals, 
+                            type = "LS", n = n, train.days = train.days, 
+                            test.days =test.days)
+  c <- cdcc_forecast_moment(prices = prices, Rtn = Rtn, ht = ht, residuals = residuals, 
+                            type = "NLS", n = n, train.days = train.days, 
+                            test.days = test.days)
+  d <- naive_forecast_moment(prices = prices, Rtn = Rtn, n = n, train.days = train.days,
+                             test.days = test.days)
+  e <- rm2006_forecast_moment(prices = prices, Rtn = Rtn, n = n, train.days = train.days,
+                              test.days = test.days)
+  
+  
+  port.sd <- cbind(a$sd, b$sd, c$sd, d$sd, e$sd )
+  colnames(port.sd) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  port.mean.sd <- rep(0, ncol(port.sd))
+  
+  for (i in 1:ncol(port.sd)) {
+    port.mean.sd[i] <- mean(port.sd[, i]) }
+  
+  # Mean Standard Deviation Metric
+  sd <- as.data.frame( t( port.mean.sd ) )
+  colnames(sd) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  
+  port.ir <- cbind(a$ir, b$ir, c$ir, d$ir, e$ir )
+  colnames(port.ir) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  port.mean.ir <- rep(0, ncol(port.ir))
+  
+  for (i in 1:ncol(port.ir)) {
+    port.mean.ir[i] <- mean(port.ir[, i]) }
+  
+  # Mean Information Ratio Metric
+  ir <- as.data.frame( t( port.mean.ir ) )
+  colnames(ir) <- c( "Sample", "LS", "NLS", "1/N", "RM2006" )
+  return(list(sd = sd, port.sd = port.sd, ir = ir, port.ir = port.ir) )
+}
+dm_test_moment <- function(df, n) {
+  
+  # case a) Sample Vs NLS 
+  d_a = df[, "Sample"] - df[,"NLS"]
+  DM_a = mean( d_a ) / sqrt( lrvar(d_a) )
+  DM.pval_a <- 1-pchisq( DM_a**2 , 1 )
+  
+  # case b) Naive Vs NLS 
+  d_b = df[, "1/N"] - df[, "NLS"]
+  DM_b = mean( d_b ) / sqrt( lrvar(d_b) )
+  DM.pval_b <- 1-pchisq( DM_b**2 , 1 )
+  
+  test.res <- cbind.data.frame( DM.pval_a, DM.pval_b )
+  colnames(test.res) <- c("DCC-S Vs. DCC-NLS", "1/N Vs. DCC-NLS" ) 
+  rownames(test.res) <- paste("p-values", n )
+  return(test.res)
+}
+ks_test_moment <- function(df, n) {
+  
+  # case a) Sample Vs NLS
+  ks.sig_a <- ks.test(  df[, "NLS"] , df[, "Sample"], alternative = "less")
+  
+  # case b) Naive Vs NLS
+  ks.sig_b <- ks.test(  df[,  "NLS"], df[, "1/N"], alternative = "less" )
+  
+  test.res <- cbind.data.frame( ks.sig_a$p.value, ks.sig_b$p.value )
+  colnames(test.res) <- c("DCC-S Vs. DCC-NLS", "1/N Vs. DCC-NLS" )  
+  rownames(test.res) <- paste("p-values", n )
+  return(test.res) 
+}
+```
+
+## Data Exploration
+```{r}
+# Load Data 
+
+# SP500 Stock Prices (Top Largest 208 Stocks- Adjusted Closing Prices)
+sp500prices = read.csv('C:/Users/hp/Desktop/BGSE/Term3/ML Finance/project/stockdata.csv',
+                       stringsAsFactors=FALSE )
+
+# Index with Dates 
+rownames(sp500prices) = as.Date(sp500prices$DATA, format = "%m/%d/%Y") 
+sp500prices = sp500prices[, -1]
+
+# Log Returns
+sp500rets <- log( sp500prices[-1, ] / sp500prices[-nrow(sp500prices), ] )
+
+# Period of Analysis
+end <- nrow(sp500rets)
+start.index <- 1000 
+start.date <- as.Date( index( as.xts( sp500rets[ start.index, ]) ) )
+end.date <- as.Date( index( as.xts( sp500rets[ end, ]) ) )
+
+# Prices and Returns employed in the Analysis 
+sp500rets <- sp500rets[ start.index:end, ]
+sp500prices <- sp500prices[ start.index:end, ]
+
+# Top 50 Largest Stocks (Prices and Returns)
+n1 <- 50                               
+top.50 <- names(sp500rets)[1:n1]
+sp500rets.50 <- sp500rets[, top.50]
+sp500prices.50 <- sp500prices[, top.50]
+
+# Top 100 Largest Stocks (Prices and Returns)
+n2 <- 100 
+top.100 <- names(sp500rets)[1:n2]
+sp500rets.100 <- sp500rets[, top.100]
+sp500prices.100 <- sp500prices[, top.100]
+
+# Top 150 Largest Stocks (Prices and Returns)
+n3 <- 150 
+top.150 <- names(sp500rets)[1:n3]
+sp500rets.150 <- sp500rets[, top.150]
+sp500prices.150 <- sp500prices[, top.150]
+```
+
+## Estimation and Forecasting Strategy
+```{r}
+# Monthly Rebalancing (5 years training + 20 Years Testing (240 data points or months) )
+train <- 5
+train.days <- train * 252 
+test <- 20
+test.days <- test * 252    
+total <- train + test 
+total.days <- total * 252 
+
+# Start Investing ("1993-07-27")
+start.investing <- as.Date( index( as.xts(sp500rets[train.days + 21, ]) ) )
+
+# Returns (Discarding some recent years to reduce computational time)
+Rtn.50 <-  sp500rets.50[1:total.days, ] 
+Rtn.100 <- sp500rets.100[1:total.days, ] 
+Rtn.150 <- sp500rets.150[1:total.days, ] 
+
+# Prices (Discarding some recent years to reduce computational time)
+prices.50 <- as.matrix(sp500prices.50[1:total.days, ])
+prices.100 <- as.matrix( sp500prices.100[1:total.days, ])
+prices.150 <- as.matrix(sp500prices.150[1:total.days, ])
+```
+
+## Methodology:
+
+# Step 1: Univariate GARCH (1, 1) Parameter Estimation with rugarch (For the Entire Analysis period with the N = 50 , N = 100, N = 150 )
+
+```{r}
+
+# N=50
+# Conditional Mean = 0 
+spec.50 = ugarchspec(mean.model = list(armaOrder = c(0,0)), 
+                  variance.model = list(garchOrder = c(1,1), model = "sGARCH"),
+                  distribution.model = "norm")
+mspec.50 = multispec( replicate(spec.50, n = n1)  )
+# Univariate Fit to all 50 Stocks 
+fitlist.50 = multifit( multispec = mspec.50, data = Rtn.50 )
+# Univariate Garch (1, 1) Variances 
+ht.50 <- sigma(fitlist.50)^2
+# Garch (1, 1) Residuals
+residuals.50 <- residuals(fitlist.50)
+
+# N=100
+# Conditional Mean = 0 
+spec.100 = ugarchspec(mean.model = list(armaOrder = c(0,0)), 
+                     variance.model = list(garchOrder = c(1,1), model = "sGARCH"),
+                     distribution.model = "norm")
+mspec.100 = multispec( replicate(spec.100, n = n2)  )
+# Univariate Fit to all 100 Stocks 
+fitlist.100 = multifit( multispec = mspec.100, data = Rtn.100 )
+# Univariate Garch (1, 1) Variances 
+ht.100 <- sigma(fitlist.100)^2
+# Garch (1, 1) Residuals
+residuals.100 <- residuals(fitlist.100)
+
+# N=150
+# Conditional Mean = 0 
+spec.150 = ugarchspec(mean.model = list(armaOrder = c(0,0)), 
+                      variance.model = list(garchOrder = c(1,1), model = "sGARCH"),
+                      distribution.model = "norm")
+mspec.150 = multispec( replicate(spec.150, n = n3)  )
+# Univariate Fit to all 150 Stocks 
+fitlist.150 = multifit( multispec = mspec.150, data = Rtn.150 )
+# Univariate Garch (1, 1) Variances 
+ht.150 <- sigma(fitlist.150)^2
+# Garch (1, 1) Residuals
+residuals.150 <- residuals(fitlist.150)
+```
+
+
+                                    #### DCC Forecast #### 
+                                    
+                                    
+# Step 2: DCC Parameter Estimation with xdcclarge (For N = 50 , N = 100, N = 150 )
+
+
+# Application 1 : Global Minimum Varaiance Portfolio
+```{r}
+# Results of the all models employed in this application for each dimension !!
+N.50.gmv <- all.models_gmv(Rtn = Rtn.50, ht = ht.50, residuals = residuals.50, n = n1, 
+                   train.days = train.days, test.days = test.days)
+N.100.gmv <- all.models_gmv(Rtn = Rtn.100, ht = ht.100, residuals = residuals.100, n = n2, 
+                    train.days = train.days, test.days = test.days)
+N.150.gmv <- all.models_gmv(Rtn = Rtn.150, ht = ht.150, residuals = residuals.150, n = n3, 
+                    train.days = train.days, test.days = test.days)
+
+# Standard Deviation METRIC  
+sd.metric.gmv <- rbind.data.frame( round(N.50.gmv$sd, 3), round(N.100.gmv$sd, 3), 
+                                   round(N.150.gmv$sd, 3))
+row.names(sd.metric.gmv) <- c("50", "100", "150")
+colnames(sd.metric.gmv) <- c( "DCC-S", "DCC-LS", "DCC-NLS", "1/N",  "RM2006" )  
+
+
+# Information Ratio METRIC 
+ir.metric.gmv <- rbind.data.frame( round(N.50.gmv$ir, 3), round(N.100.gmv$ir, 3), 
+                                   round(N.150.gmv$ir, 3))
+row.names(ir.metric.gmv) <- c("50", "100", "150")
+colnames(ir.metric.gmv) <- c( "DCC-S", "DCC-LS", "DCC-NLS", "1/N",  "RM2006" )
+
+
+# Significance Test for only the primary performance measure (Standard Deviation) 
+
+# 1) Diebold Mariano (DM) Test 
+
+# Results 
+dm_all_gmv <- rbind.data.frame(  round( dm_test_gmv(N.50.gmv$port.sd, 50), 3),
+                                 round( dm_test_gmv(N.100.gmv$port.sd, 100), 3),
+                                 round( dm_test_gmv(N.150.gmv$port.sd, 150), 3) )
+
+
+# 2) Kolmogorov Smirnov (KS) Test 
+
+# Results
+ks_all_gmv <- rbind.data.frame( round( ks_test_gmv(N.50.gmv$port.sd, 50), 3), 
+                                round( ks_test_gmv(N.100.gmv$port.sd, 100), 3),
+                                round( ks_test_gmv(N.150.gmv$port.sd, 150), 3) )
+
+```
+
+# Application 2 : Full Markowitz Portfolio with the Momentum Signal 
+```{r}
+# Results of the all models employed in this application for each dimension !!
+N.50.moment <- all.models_moment(prices = prices.50 ,Rtn = Rtn.50, ht = ht.50, 
+                                 residuals = residuals.50, n = n1, train.days = train.days,
+                                 test.days = test.days)
+N.100.moment <- all.models_moment(prices = prices.100 ,Rtn = Rtn.100, ht = ht.100, 
+                                 residuals = residuals.100, n = n2, train.days = train.days,
+                                 test.days = test.days)
+N.150.moment <- all.models_moment(prices = prices.150 ,Rtn = Rtn.150, ht = ht.150, 
+                                 residuals = residuals.150, n = n3, train.days = train.days,
+                                 test.days = test.days)
+
+# Standard Deviation METRIC  
+sd.metric.moment <- rbind.data.frame( round(N.50.moment$sd, 3), round(N.100.moment$sd, 3), 
+                                      round(N.150.moment$sd, 3))
+row.names(sd.metric.moment) <- c("50", "100", "150")
+colnames(sd.metric.moment) <- c( "DCC-S", "DCC-LS", "DCC-NLS", "1/N",  "RM2006" )
+
+
+# Information Ratio METRIC 
+ir.metric.moment <- rbind.data.frame( round(N.50.moment$ir, 3), round(N.100.moment$ir, 3), 
+                               round(N.150.moment$ir, 3))
+row.names(ir.metric.moment) <- c("50", "100", "150")
+colnames(ir.metric.moment) <- c( "DCC-S", "DCC-LS", "DCC-NLS", "1/N",  "RM2006" )
+
+
+
+# Significance Test only for the primary performance measure (Information Ratio)
+
+# 1) Diebold Mariano (DM) Test
+
+# Results 
+dm_all_moment <- rbind.data.frame( round( dm_test_moment(N.50.moment$port.ir, 50), 3),
+                                round( dm_test_moment(N.100.moment$port.ir, 100), 3),
+                                round( dm_test_moment(N.150.moment$port.ir, 150), 3) )
+
+
+# 2) Kolmogorov Smirnov (KS) Test 
+
+# Results
+ks_all_moment <- rbind.data.frame( round( ks_test_moment(N.50.moment$port.ir, 50), 3), 
+                                round( ks_test_moment(N.100.moment$port.ir, 100), 3),
+                                round( ks_test_moment(N.150.moment$port.ir, 150), 3) )
+
+```
